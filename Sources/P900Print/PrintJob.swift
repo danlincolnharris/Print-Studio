@@ -80,6 +80,16 @@ enum PDFWriter {
             throw PipelineError.failed("Could not create the PDF.")
         }
         ctx.beginPDFPage(nil)
+        drawPage(ctx: ctx, image: image, layout: layout)
+        ctx.endPDFPage()
+        ctx.closePDF()
+        return url
+    }
+
+    /// Draws one converted image (and crop marks) on the current PDF page.
+    static func drawPage(ctx: CGContext, image: CGImage, layout: LayoutResult) {
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
         if layout.landscape {
             // The sheet is always fed portrait, so a landscape page is the portrait page turned 90 degrees.
             ctx.translateBy(x: CGFloat(layout.canvasW), y: 0)
@@ -103,9 +113,6 @@ enum PDFWriter {
             }
             ctx.strokePath()
         }
-        ctx.endPDFPage()
-        ctx.closePDF()
-        return url
     }
 }
 

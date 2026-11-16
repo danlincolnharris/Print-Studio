@@ -314,9 +314,25 @@ final class PrintStats: ObservableObject {
                               areaSqIn: area, coverage: coverage, jobID: jobID,
                               blackInk: Ink.blackInk(forMedia: job.paper.mediaCode))
         rec.settings = settings
-        let source = job.imageURL
-        let base = rec
+        save(rec, source: job.imageURL, thumbnail: thumbnail)
+    }
 
+    /// Logs a multi-page PDF print as one history entry; copies counts every page sent.
+    func recordPDF(url: URL, paper: PaperPreset, sheet: SheetSize, layout: LayoutResult?,
+                   pagesSent: Int, jobIDs: [String], coverage: Double, mode: String,
+                   thumbnail: NSImage?, settings: [String: String]) {
+        let area = layout.map { Double($0.rect.width * $0.rect.height) / 5184.0 } ?? 0
+        var rec = PrintRecord(date: Date(),
+                              title: url.displayName,
+                              paper: paper.name, mediaCode: paper.mediaCode,
+                              sheetID: sheet.id, mode: mode, copies: max(1, pagesSent),
+                              areaSqIn: area, coverage: coverage, jobID: jobIDs.first ?? "",
+                              blackInk: Ink.blackInk(forMedia: paper.mediaCode))
+        rec.settings = settings
+        save(rec, source: url, thumbnail: thumbnail)
+    }
+
+    private func save(_ base: PrintRecord, source: URL, thumbnail: NSImage?) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var finished = base
             let fm = FileManager.default

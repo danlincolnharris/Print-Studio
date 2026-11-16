@@ -408,6 +408,39 @@ struct ControlsPane: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                if s.isPDF {
+                    Divider().opacity(0.6)
+                    section("Pages") {
+                        HStack(spacing: 10) {
+                            Button { s.goToPage(s.pdfPage - 1) } label: { Image(systemName: "chevron.left") }
+                                .disabled(s.pdfPage <= 1)
+                            Text("Page \(s.pdfPage) of \(s.pdfPageCount)")
+                                .monospacedDigit()
+                                .frame(minWidth: 110)
+                            Button { s.goToPage(s.pdfPage + 1) } label: { Image(systemName: "chevron.right") }
+                                .disabled(s.pdfPage >= s.pdfPageCount)
+                            Spacer(minLength: 0)
+                        }
+                        HStack {
+                            Text("Print pages")
+                            TextField("All", text: $s.pdfRange)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        Picker("", selection: $s.pdfFilter) {
+                            ForEach(PageFilter.allCases) { f in
+                                Text(f.label).tag(f)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Toggle("Last page first", isOn: $s.pdfReverse)
+                        Text(pageNote)
+                            .font(.caption)
+                            .foregroundStyle(s.pageSelection.error == nil ? Color.secondary : Color.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
                 Divider().opacity(0.6)
                 section("Print") {
                     Stepper("Copies: \(s.copies)", value: $s.copies, in: 1...20)
@@ -439,6 +472,18 @@ struct ControlsPane: View {
                         .help("Clears every job from the P900 print queue")
                     }
                     .controlSize(.large)
+                    if let progress = s.pdfProgress {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text(progress)
+                                .font(.caption)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                            Button("Stop") { s.stopPDFPrint() }
+                                .controlSize(.small)
+                                .help("Stops sending pages. Pages already sent still print; Cancel all jobs stops those too.")
+                        }
+                    }
                     Text("Fixed: Max Quality, 5760 dpi, driver color management off.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -526,8 +571,21 @@ struct ControlsPane: View {
         switch s.sendState {
         case .sending: return "Sending…"
         case .sent: return "Sent to printer"
-        case .idle: return s.copies > 1 ? "Print \(s.copies) copies" : "Print"
+        case .idle:
+            if s.isPDF {
+                let n = s.selectedPages.count
+                let pages = n == 1 ? "1 page" : "\(n) pages"
+                return s.copies > 1 ? "Print \(pages) × \(s.copies)" : "Print \(pages)"
+            }
+            return s.copies > 1 ? "Print \(s.copies) copies" : "Print"
         }
+    }
+
+    /// The line under the page range: what is selected, or what is wrong with the range.
+    private var pageNote: String {
+        if let e = s.pageSelection.error { return e }
+        let n = s.selectedPages.count
+        return "\(n) page\(n == 1 ? "" : "s") selected. Examples: 1-12, 15, 20-. Leave empty for all. Layout, paper and color settings apply to every page; Preview PDF shows the first \(PDFPrintJob.previewPages)."
     }
 
     /// The date the photo was taken, to write on the back of the print.

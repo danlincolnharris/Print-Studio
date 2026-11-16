@@ -29,6 +29,11 @@ struct PrintSession: Identifiable {
     var contrast: Double = 0
     var saturation: Double = 0
     var logText = ""
+    var pdfPageCount = 0
+    var pdfPage = 1
+    var pdfRange = ""
+    var pdfFilter: PageFilter = .all
+    var pdfReverse = false
     /// Settings to apply the next time this tab is shown (a reprint that finished opening while another tab was showing).
     var pendingApply: [String: String]?
 }
@@ -70,6 +75,25 @@ final class AppState: ObservableObject {
     @Published var sourceProfileName: String = ""
     /// When the photo was taken, from the file's EXIF data. Nil if the file has none.
     @Published var dateTaken: Date? = nil
+
+    // Multi-page PDF. pdfPageCount is 0 when the open file is a photo.
+    @Published var pdfPageCount = 0
+    /// The page shown in the preview, 1-based.
+    @Published var pdfPage = 1
+    /// Which pages to print, e.g. "1-12, 15, 20-". Empty means all.
+    @Published var pdfRange = ""
+    @Published var pdfFilter: PageFilter = .all
+    /// Print the selection last page first.
+    @Published var pdfReverse = false
+    /// Progress of a running PDF print, shown under the Print button. Nil when nothing is running.
+    @Published var pdfProgress: String? = nil
+    private let pdfStop = StopFlag()
+    var isPDF: Bool { pdfPageCount > 0 }
+
+    var pageSelection: (pages: [Int]?, error: String?) {
+        PageSelection.pages(text: pdfRange, count: pdfPageCount, filter: pdfFilter, reverse: pdfReverse)
+    }
+    var selectedPages: [Int] { pageSelection.pages ?? [] }
 
     // Papers
     @Published var papers: [PaperPreset] = []
@@ -414,14 +438,16 @@ final class AppState: ObservableObject {
     var unitName: String { useCM ? "cm" : "in" }
     var unitFactor: Double { useCM ? 2.54 : 1 }
 
-    var canPrint: Bool { imageURL != nil && selectedPaper != nil && !isBusy }
+    var canPrint: Bool { imageURL != nil && selectedPaper != nil && !isBusy && (!isPDF || !selectedPages.isEmpty) }
 
     var summary: String {
         guard let l = layout else { return "Open or drop an image to begin." }
         let w = l.rect.width / 72
         let h = l.rect.height / 72
-        let ppi = Double(pixelSize.width) / max(Double(w), 0.01)
+        // PDF pages are always drawn at the print resolution, whatever size they print at.
+        let ppi = isPDF ? P900.targetPPI : Double(pixelSize.width) / max(Double(w), 0.01)
         var s = String(format: "Prints %.1f × %.1f %@, %.0f ppi", Double(w) * unitFactor, Double(h) * unitFactor, unitName, ppi)
+        if isPDF { s = "Page \(pdfPage) of \(pdfPageCount): " + s }
         if ppi < 180 { s += ", low resolution" }
         if l.bleed { s += ", edges trimmed to fill the sheet" }
         if mode == .half { s += ", other half left free" }
@@ -439,7 +465,7 @@ final class AppState: ObservableObject {
 
     func openPanel() {
         let p = NSOpenPanel()
-        p.allowedContentTypes = [.tiff, .png, .jpeg]
+        p.allowedContentTypes = [.tiff, .png, .jpeg, .pdf]
         p.canChooseDirectories = false
         p.allowsMultipleSelection = false
         if p.runModal() == .OK, let u = p.url { load(url: u) }
@@ -494,6 +520,8 @@ final class AppState: ObservableObject {
         x.paperID = paperID; x.sheetID = sheetID
         x.hAlign = hAlign; x.vAlign = vAlign; x.halfPosition = halfPosition
         x.cropMarks = cropMarks; x.brightness = brightness; x.contrast = contrast; x.saturation = saturation; x.logText = logText
+        x.pdfPageCount = pdfPageCount; x.pdfPage = pdfPage; x.pdfRange = pdfRange
+        x.pdfFilter = pdfFilter; x.pdfReverse = pdfReverse
         sessions[i] = x
     }
 
@@ -506,6 +534,8 @@ final class AppState: ObservableObject {
         sheetID = x.sheetID
         hAlign = x.hAlign; vAlign = x.vAlign; halfPosition = x.halfPosition
         cropMarks = x.cropMarks; brightness = x.brightness; contrast = x.contrast; saturation = x.saturation; logText = x.logText
+        pdfPageCount = x.pdfPageCount; pdfPage = x.pdfPage; pdfRange = x.pdfRange
+        pdfFilter = x.pdfFilter; pdfReverse = x.pdfReverse
         pendingSettings = nil
         if let p = x.pendingApply {
             apply(settings: p)
@@ -531,6 +561,11 @@ final class AppState: ObservableObject {
         saturation = 0
         copies = 1
         logText = ""
+        pdfPageCount = 0
+        pdfPage = 1
+        pdfRange = ""
+        pdfFilter = .all
+        pdfReverse = false
     }
 
     /// Parks the current print as a tab and starts a blank one.
@@ -575,6 +610,10 @@ final class AppState: ObservableObject {
         let settings = pendingSettings
         pendingSettings = nil
         logLine("Loading \(url.lastPathComponent)…")
+        if url.pathExtension.lowercased() == "pdf" {
+            loadPDF(url: url, page: 1, settings: settings, sid: sid, seq: seq, pageTurn: false)
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else {
                 DispatchQueue.main.async {
@@ -621,6 +660,8 @@ final class AppState: ObservableObject {
                 }
                 if sid == self.activeID {
                     self.imageURL = url
+                    self.pdfPageCount = 0
+                    self.pdfPage = 1
                     self.pixelSize = CGSize(width: w, height: h)
                     self.sourceDPI = dpi
                     self.sourceProfileName = profile
@@ -636,6 +677,8 @@ final class AppState: ObservableObject {
                     // You switched tabs while this was opening: fill in the tab it was meant for.
                     var x = self.sessions[i]
                     x.imageURL = url
+                    x.pdfPageCount = 0
+                    x.pdfPage = 1
                     x.pixelSize = CGSize(width: w, height: h)
                     x.sourceDPI = dpi
                     x.sourceProfileName = profile
@@ -651,6 +694,91 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Opens a PDF (or turns to another page of it): reads the page count and size, and renders
+    /// the page for the preview. The page size at 360 ppi becomes the "pixel size" the layout uses,
+    /// so Custom at 100% prints the page at its real size.
+    private func loadPDF(url: URL, page: Int, settings: [String: String]?, sid: UUID, seq: Int, pageTurn: Bool) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let doc = PDFPages.open(url)
+            let count = doc?.numberOfPages ?? 0
+            let n = min(max(page, 1), max(count, 1))
+            var size = CGSize.zero
+            var thumb: CGImage?
+            if let d = doc, let pg = d.page(at: n) {
+                size = PDFPages.pageSize(pg)
+                thumb = PDFPages.renderPreview(pg, maxSide: 1800)
+            }
+            DispatchQueue.main.async {
+                guard let self = self, self.loadSeq[sid] == seq else { return }
+                self.loading.remove(sid)
+                guard count > 0, size.width > 0, size.height > 0, let t = thumb else {
+                    self.logLine("Could not open \(url.lastPathComponent) as a PDF. If it is password protected, save an unlocked copy first.")
+                    return
+                }
+                let px = CGSize(width: (Double(size.width) / 72 * P900.targetPPI).rounded(),
+                                height: (Double(size.height) / 72 * P900.targetPPI).rounded())
+                let image = NSImage(cgImage: t, size: .zero)
+                let profile = "PDF, \(count) page\(count == 1 ? "" : "s"), drawn at \(Int(P900.targetPPI)) ppi in Adobe RGB"
+                let msg = String(format: "Loaded %@: %ld page%@, page %ld is %.2f × %.2f in.",
+                                 url.lastPathComponent, count, count == 1 ? "" : "s", n,
+                                 Double(size.width) / 72, Double(size.height) / 72)
+                if sid == self.activeID {
+                    self.imageURL = url
+                    self.pdfPageCount = count
+                    self.pdfPage = n
+                    self.pixelSize = px
+                    self.sourceDPI = P900.targetPPI
+                    self.sourceProfileName = profile
+                    self.dateTaken = nil
+                    if !pageTurn {
+                        self.customScale = 1
+                        self.brightness = 0
+                        self.contrast = 0
+                        self.saturation = 0
+                        self.pdfRange = ""
+                        self.pdfFilter = .all
+                        self.pdfReverse = false
+                        if let p = settings { self.apply(settings: p) }
+                        self.logLine(msg)
+                    }
+                    self.preview = image
+                } else if let i = self.sessions.firstIndex(where: { $0.id == sid }) {
+                    var x = self.sessions[i]
+                    x.imageURL = url
+                    x.pdfPageCount = count
+                    x.pdfPage = n
+                    x.pixelSize = px
+                    x.sourceDPI = P900.targetPPI
+                    x.sourceProfileName = profile
+                    x.dateTaken = nil
+                    x.preview = image
+                    if !pageTurn {
+                        x.customScale = 1
+                        x.brightness = 0
+                        x.contrast = 0
+                        x.saturation = 0
+                        x.pdfRange = ""
+                        x.pdfFilter = .all
+                        x.pdfReverse = false
+                        x.pendingApply = settings
+                        x.logText = x.logText.isEmpty ? msg : x.logText + "\n" + msg
+                    }
+                    self.sessions[i] = x
+                }
+            }
+        }
+    }
+
+    /// Shows another page of the open PDF in the preview. Layout and color settings stay as they are.
+    func goToPage(_ n: Int) {
+        guard isPDF, let url = imageURL, n >= 1, n <= pdfPageCount, n != pdfPage else { return }
+        let sid = activeID
+        let seq = (loadSeq[sid] ?? 0) + 1
+        loadSeq[sid] = seq
+        loading.insert(sid)
+        loadPDF(url: url, page: n, settings: nil, sid: sid, seq: seq, pageTurn: true)
     }
 
     /// EXIF dates look like "2021:10:12 16:32:05". They carry no time zone, so they are read as local time.
@@ -712,6 +840,7 @@ final class AppState: ObservableObject {
         if let v = d["glossSmooth"] { setFlag(\.glossSmooth, v == "1") }
         if let v = d["bottomEdge"] { setFlag(\.bottomEdge, v == "1") }
         if let v = d["highSpeed"] { setFlag(\.highSpeed, v == "1") }
+        if let v = d["pdfRange"] { pdfRange = v }
     }
 
     /// Loads a saved copy of a past print back in with the settings it was printed with.
@@ -742,6 +871,7 @@ final class AppState: ObservableObject {
     // MARK: Printing
 
     func startPrint(dryRun: Bool) {
+        if isPDF { startPDFPrint(dryRun: dryRun); return }
         guard !isBusy, let url = imageURL, let paper = selectedPaper, let lay = layout else { return }
         if !dryRun {
             guard let found = Spooler.resolveQueue(queue) else {
@@ -812,6 +942,112 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Prints the selected pages of the open PDF, converting each page and sending them in small batches.
+    func startPDFPrint(dryRun: Bool) {
+        guard !isBusy, let url = imageURL, let paper = selectedPaper else { return }
+        let sel = pageSelection
+        guard let pages = sel.pages, !pages.isEmpty else {
+            logLine(sel.error ?? "No pages selected.")
+            return
+        }
+        if !dryRun {
+            guard let found = Spooler.resolveQueue(queue) else {
+                logLine("No P900 print queue found. Add the printer in System Settings > Printers & Scanners using the Epson driver, then try again.")
+                return
+            }
+            if found != queue {
+                logLine("Print queue \"\(queue)\" was not found, using \"\(found)\" instead.")
+                queue = found
+            }
+        }
+        let settings = LayoutSettings(mode: mode, orientation: orientation, border: border,
+                                      customScale: customScale, hAlign: hAlign, vAlign: vAlign,
+                                      half: halfPosition, cropMarks: cropMarks)
+        let job = PDFPrintJob(url: url, pages: pages, settings: settings, sheet: selectedSheet,
+                              paper: paper, intent: intent, blackPoint: blackPoint,
+                              tagWithPaperProfile: tagWithPaperProfile, queue: queue,
+                              copies: copies, frontFeed: false, overcoat: flag(\.overcoat),
+                              glossSmooth: flag(\.glossSmooth), bottomEdge: flag(\.bottomEdge),
+                              highSpeed: flag(\.highSpeed, default: true), tone: tone)
+        var settingsSnapshot = currentSettings()
+        settingsSnapshot["pdfRange"] = pdfRange
+        let allowedUntil = allowQueueUntil
+        let q = queue
+        let previewSnapshot = preview
+        let modeSnapshot = mode.rawValue
+        let stop = pdfStop
+        stop.set(false)
+        isBusy = true
+        if !dryRun { sendState = .sending }
+        pdfProgress = "Starting…"
+        let n = pages.count * (dryRun ? 1 : max(1, copies))
+        logLine(dryRun ? "Rendering preview of the first pages…" : "Printing \(n) page\(n == 1 ? "" : "s") of \(url.lastPathComponent)…")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            func finish() {
+                DispatchQueue.main.async {
+                    self?.isBusy = false
+                    self?.sendState = .idle
+                    self?.pdfProgress = nil
+                }
+            }
+            if !dryRun {
+                switch Spooler.preflight(queue: q) {
+                case .ok:
+                    break
+                case .offline(let msg):
+                    DispatchQueue.main.async { self?.logLine(msg) }
+                    finish()
+                    return
+                case .queued(let k):
+                    if Date() >= allowedUntil {
+                        DispatchQueue.main.async {
+                            self?.allowQueueUntil = Date().addingTimeInterval(20)
+                            self?.logLine("\(k) job\(k == 1 ? " is" : "s are") already in the print queue, so nothing new was sent. Press Print again within 20 seconds to send this one anyway, or use Cancel all jobs.")
+                        }
+                        finish()
+                        return
+                    }
+                }
+            }
+            do {
+                let out = try job.run(dryRun: dryRun,
+                                      progress: { msg in DispatchQueue.main.async { self?.pdfProgress = msg } },
+                                      shouldStop: { stop.isSet })
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.isBusy = false
+                    self.pdfProgress = nil
+                    self.sendState = .idle
+                    self.logLine(out.text)
+                    if !dryRun && out.pagesSent > 0 {
+                        self.markSent()
+                        PrintStats.shared.recordPDF(url: url, paper: paper, sheet: job.sheet,
+                                                    layout: out.firstLayout, pagesSent: out.pagesSent,
+                                                    jobIDs: out.jobIDs,
+                                                    coverage: Coverage.estimate(previewSnapshot),
+                                                    mode: modeSnapshot, thumbnail: previewSnapshot,
+                                                    settings: settingsSnapshot)
+                        PrintStats.shared.refreshAfterPrint(queue: self.queue)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self?.isBusy = false
+                    self?.sendState = .idle
+                    self?.pdfProgress = nil
+                    self?.logLine("Error: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    /// Stops a running PDF print after the page being converted. Pages already sent still print.
+    func stopPDFPrint() {
+        guard pdfProgress != nil else { return }
+        pdfStop.set(true)
+        pdfProgress = "Stopping after the current page…"
     }
 
     /// Shows "Sent to printer" on the Print button for a moment, then goes back to normal.

@@ -46,6 +46,50 @@ enum ColorPipeline {
             notes.append("Image has no RGB profile, treated as sRGB.")
         }
 
+        return try process(workingCS: workingCS, iccData: iccData, notes: notes,
+                           targetW: targetW, targetH: targetH, paperProfile: paperProfile,
+                           intent: intent, blackPoint: blackPoint,
+                           tagWithPaperProfile: tagWithPaperProfile, tone: tone) { ctx in
+            ctx.interpolationQuality = .high
+            ctx.draw(full, in: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+        }
+    }
+
+    /// Draws one PDF page at targetW x targetH into an Adobe RGB working image (so text and photos
+    /// are rendered at full print resolution), then converts it to the paper profile like a photo.
+    static func convertPDFPage(_ page: CGPDFPage,
+                               targetW: Int,
+                               targetH: Int,
+                               paperProfile: URL,
+                               intent: Intent,
+                               blackPoint: Bool,
+                               tagWithPaperProfile: Bool,
+                               tone: Tone = Tone()) throws -> (image: CGImage, notes: [String]) {
+        guard let cs = PDFPages.workingSpace, let icc = cs.copyICCData() else {
+            throw PipelineError.failed("Could not create the Adobe RGB working space.")
+        }
+        return try process(workingCS: cs, iccData: icc as Data, notes: [],
+                           targetW: targetW, targetH: targetH, paperProfile: paperProfile,
+                           intent: intent, blackPoint: blackPoint,
+                           tagWithPaperProfile: tagWithPaperProfile, tone: tone) { ctx in
+            PDFPages.draw(page, in: ctx, width: targetW, height: targetH)
+        }
+    }
+
+    /// Shared second half: draws the source into a working buffer, applies the sliders,
+    /// converts to the paper profile and returns an 8-bit image ready to embed in the PDF.
+    private static func process(workingCS: CGColorSpace,
+                                iccData: Data,
+                                notes startNotes: [String],
+                                targetW: Int,
+                                targetH: Int,
+                                paperProfile: URL,
+                                intent: Intent,
+                                blackPoint: Bool,
+                                tagWithPaperProfile: Bool,
+                                tone: Tone,
+                                draw: (CGContext) -> Void) throws -> (image: CGImage, notes: [String]) {
+        var notes = startNotes
         // Resample in the source space, keeping 16 bits when macOS allows it.
         func makeContext(bits: Int) -> CGContext? {
             var info = CGImageAlphaInfo.noneSkipLast.rawValue
@@ -64,8 +108,7 @@ enum ColorPipeline {
         guard let ctx = ctxOpt, let srcPtr = ctx.data else {
             throw PipelineError.failed("Could not allocate the image buffer (\(targetW) x \(targetH)).")
         }
-        ctx.interpolationQuality = .high
-        ctx.draw(full, in: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+        draw(ctx)
         Tone.apply(tone, data: srcPtr, bits: bits, width: targetW, height: targetH, stride: ctx.bytesPerRow)
 
         // Convert to the paper profile.

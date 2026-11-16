@@ -23,6 +23,23 @@ Installs to ~/Applications/Kalina Print Studio.app.
 
 You can also drop a TIFF/JPEG/PNG on the window or press Cmd-O.
 
+## Multi-page PDFs (magazines, books, portfolios)
+
+Open or drop a PDF like a photo (or use Finder's Open With). A Pages section appears:
+
+- Arrows step through the pages in the preview; soft proof and the gamut check follow the page shown.
+- Print pages: a range such as `1-12, 15, 20-`. Empty prints every page.
+- All / Odd only / Even only, and Last page first, for printing both sides by hand
+  (print the odd pages, turn the stack over, print the even pages).
+- Layout, paper, color and the Adjust sliders apply to every page. Custom at 100% prints a page at its real size.
+
+Each page is drawn at 360 ppi into an Adobe RGB working image (photos and text at full print resolution) and
+converted to the paper profile exactly like a photo. Pages go to the printer in batches of 6, and a new batch is
+only sent when at most one job is waiting, so the print queue never fills with gigabytes. Reload paper whenever the
+printer asks; the job waits. Stop (under the Print button) stops sending more pages; Cancel all jobs also clears
+what was already sent. Preview PDF renders the first 4 pages of the range. A PDF run is one history entry, and
+Print again reopens the PDF with the same settings and page range.
+
 ## Layout options
 
 - Fit / Full bleed / Custom / Half sheet (top, bottom, left or right, leaves the other half free, 0.5 in gap)
